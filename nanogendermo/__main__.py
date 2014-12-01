@@ -137,6 +137,7 @@ static_rules = [
     # Actually not the case
     Exact('madam', 'sir'),
     Exact('Mrs', 'Mr'),
+    Exact('Mrs.', 'Mr.'),
     Exact('Miss', 'Mister'),
 
     Exact('she', 'he'),
