@@ -154,5 +154,5 @@ class PosTag:
     @staticmethod
     def nounish(word, pos):
         # nltk apparently defaults to 'NN' for smileys :) so special-case those
-        return pos in (POS.NN, POS.NNS, POS.NNP, POS.NNPS) and \
+        return pos in (PosTag.NN, PosTag.NNS, PosTag.NNP, PosTag.NNPS) and \
             any(c.isalpha() for c in word)

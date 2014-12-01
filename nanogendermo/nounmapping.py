@@ -82,9 +82,6 @@ def rough_mapping():
                 if sibling_synset != femme_synset:
                     sibling_lemmas.extend(single_word_lemma_names(sibling_synset))
 
-            if 'goddess' in femme_lemmas:
-                import pdb; pdb.set_trace()
-
             if not femme_lemmas or not (hyper_lemmas + sibling_lemmas): continue
 
             if any(hyper_lemma in femme_synset.definition()
@@ -116,6 +113,9 @@ def rough_mapping():
 
 def go():
     for femme_lemma, other_lemmas in rough_mapping():
+        if femme_lemma == 'woman':
+            print femme_lemma, other_lemmas
+
         pprint.pprint((femme_lemma, other_lemmas))
 
 

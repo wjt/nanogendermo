@@ -1,14 +1,23 @@
 # vim: fileencoding=utf-8
 
 import bisect
+import cPickle as pickle
 import codecs
 import collections
+import errno
 import itertools
+import logging
+import nltk
 import textblob
 import textwrap
-import nltk
+
+from textblob.utils import PUNCTUATION_REGEX
 
 from nanogendermo.pos import PosTag
+from nanogendermo.nounmapping import rough_mapping
+
+
+log = logging.getLogger(__name__)
 
 
 def _Create(n):
@@ -41,8 +50,13 @@ class Suffix(_Create('Suffix')):
     def matches(r, w): return w.endswith(r.xx)
     def apply  (r, w): return w[:-len(r.xx)] + r.xy
 
+
+def remove_all(l, to_remove):
+    return [ x for x in l if x not in to_remove ]
+
+
 class Names(object):
-    def __init__(self, xx_xys=None):
+    def __init__(self, exclude=[], xx_xys=None):
         if xx_xys is not None:
             (self.xxs, self.xys) = xx_xys
         else:
@@ -52,13 +66,13 @@ class Names(object):
             female.sort()
             male.sort()
 
-            self.xxs = [ xx for xx in female if xx not in male ]
-            self.xys = [ xy for xy in male if xy not in female ]
+            self.xxs = remove_all(female, male + exclude)
+            self.xys = remove_all(male, female + exclude)
 
     pos = frozenset((PosTag.NNP,))
 
     def flip(self):
-        return Names((self.xys, self.xxs))
+        return Names(xx_xys=(self.xys, self.xxs))
 
     def fmap(self, f):
         return None
@@ -76,11 +90,17 @@ class Mapping(object):
     def __init__(self, rules):
         self.rules = (
             rules +
-            filter(None, [r.fmap(str.title) for r in rules]) +
-            filter(None, [r.fmap(str.upper) for r in rules])
+            filter(None, [r.fmap(lambda x: x.title()) for r in rules]) +
+            filter(None, [r.fmap(lambda x: x.upper()) for r in rules])
         )
 
-    def map(self, word, successor):
+    def map(self, original_word, successor):
+        if original_word.pos_tag == PosTag.NNS:
+            word = original_word.singularize()
+            word.pos_tag = PosTag.NN
+        else:
+            word = original_word
+
         for rule in self.rules:
             if word.pos_tag in rule.pos and rule.matches(word):
                 replacement = textblob.Word(rule.apply(word), pos_tag=word.pos_tag)
@@ -93,7 +113,10 @@ class Mapping(object):
                 #    successor is not None and
                 #    successor.pos_tag in rule.if_followed_by)
 
-                return {replacement}
+                if original_word.pos_tag == PosTag.NNS:
+                    return { replacement.pluralize() }
+                else:
+                    return { replacement }
 
         return set()
 
@@ -107,12 +130,14 @@ class BiMapping(object):
         candidates = (
             self.xx_xy.map(word, successor) |
             self.xy_xx.map(word, successor))
-        return candidates or {word}
+        return candidates
 
 
-mapping = BiMapping([
+static_rules = [
     # Actually not the case
     Exact('madam', 'sir'),
+    Exact('Mrs', 'Mr'),
+    Exact('Miss', 'Mister'),
 
     Exact('she', 'he'),
 
@@ -124,73 +149,170 @@ mapping = BiMapping([
 
     Exact('herself', 'himself'),
 
-    # TODO: How to disambiguate?
-    # Or just build exact matches out of the dictionary
-    Suffix('ress', 'er'),
-    Suffix('ress', 'or'),
+    Exact('woman', 'man'),
+    Exact('female', 'male'),
+    # Suffix('woman', 'man'),
+    # Exact('women', 'men'),
 
-    Prefix('woman', 'man'),
-    Exact('women', 'men'),
+    # bzzt, person -> perdaughter
+    # Suffix('daughter', 'son'),
+    Exact('daughter', 'son'),
+    Exact('girl', 'boy'),
 
     Prefix('queen', 'king'),
 
-    Names(),
-])
+    # A little disappointing that the WordNet-derived rules don't generate this.
+    Exact('Countess', 'Count'),
+    Exact('Princess', 'Prince'),
+    Exact('gentlewoman', 'gentleman'),
+    Exact('sister', 'brother'),
 
-first_paragraph = u'''
-To Sherlock Holmes she is always THE woman. I have seldom heard
-him mention her under any other name. In his eyes she eclipses
-and predominates the whole of her sex. It was not that he felt
-any emotion akin to love for Irene Adler. All emotions, and that
-one particularly, were abhorrent to his cold, precise but
-admirably balanced mind. He was, I take it, the most perfect
-reasoning and observing machine that the world has seen, but as a
-lover he would have placed himself in a false position. He never
-spoke of the softer passions, save with a gibe and a sneer. They
-were admirable things for the observer--excellent for drawing the
-veil from men's motives and actions. But for the trained reasoner
-to admit such intrusions into his own delicate and finely
-adjusted temperament was to introduce a distracting factor which
-might throw a doubt upon all his mental results. Grit in a
-sensitive instrument, or a crack in one of his own high-power
-lenses, would not be more disturbing than a strong emotion in a
-nature such as his. And yet there was but one woman to him, and
-that woman was the late Irene Adler, of dubious and questionable
-memory.
-'''
+    Names(exclude=['Sherlock', 'King', 'Von', 'Prince']),
+]
+
+
+def generate_rules():
+    cache_filename = 'wordnet-rules.pickle'
+    try:
+        with open(cache_filename, 'rb') as f:
+            log.info("Loading cached rules from %s", cache_filename)
+            return pickle.load(f)
+    except IOError as e:
+        if e.errno != errno.ENOENT: raise
+
+        log.info("Generating rules from WordNet")
+        rules = [
+            Exact(femme_lemma, other_lemma)
+            for femme_lemma, other_lemmas in rough_mapping()
+            for other_lemma in other_lemmas
+        ]
+
+        with open(cache_filename, 'wb') as f:
+            log.info("Caching rules to %s", cache_filename)
+            pickle.dump(rules, f, pickle.HIGHEST_PROTOCOL)
+
+        return rules
+
 
 def shift_zip(xs):
     return itertools.izip_longest(xs, xs[1:], fillvalue=(None, None))
 
 
-def swap_paragraph(paragraph):
+class Substitution(collections.namedtuple('Substitution', 'old new')):
+    pass
+
+
+def swap_paragraph(mapping, paragraph):
     b = textblob.TextBlob(paragraph.replace('--', u' – '))
     new_sentences = []
+
     for sentence in b.sentences:
         new_words = []
         lengths = []
-        for (word, pos_tag), (next_word, next_pos_tag) in shift_zip(sentence.pos_tags):
-            flipped = '|'.join(mapping.map(word, next_word))
 
-            new_words.append(flipped)
-            lengths.append(max(len(x) for x in (word, pos_tag, flipped)))
+        # Inlined to exclude 'if not PUNCTUATION_REGEX.match(unicode(t))]'
+        sentence_pos_tags = [
+            (textblob.Word(word, pos_tag=t), unicode(t))
+            for word, t in sentence.pos_tagger.tag(sentence.raw)
+        ]
+        for (word, pos_tag), (next_word, next_pos_tag) in shift_zip(sentence_pos_tags):
+            replacements = mapping.map(word, next_word)
+            if replacements:
+                new_word = Substitution(word, '|'.join(replacements))
+            else:
+                new_word = word
+
+            new_words.append(new_word)
+            lengths.append(max(len(x) for x in (word, pos_tag, new_word)))
+
+            # TODO: remove whitespace around punctuation.
 
         #print ' '.join('%*s' % (l, x) for l, (x, t) in zip(lengths, sentence.pos_tags))
         #print ' '.join('%*s' % (l, t) for l, (x, t) in zip(lengths, sentence.pos_tags))
         #print ' '.join('%*s' % (l, y) for l, y      in zip(lengths, new_words))
         #print
-        new_sentences.append(' '.join(new_words))
+        new_sentences.append(new_words)
 
-    new_paragraph = '\n'.join(textwrap.wrap('. '.join(new_sentences)))
-    return new_paragraph
+    return reassemble(new_sentences)
+
+
+def reassemble(sentences):
+    at_start = True
+
+
+    in_dquote = False
+    buf = []
+
+    for sentence in sentences:
+        for fragment in sentence:
+            if fragment == '"':
+                if in_dquote:
+                    in_dquote = False
+                else:
+                    if not at_start:
+                        buf.append(' ')
+
+                    at_start = True
+                    in_dquote = True
+            elif not PUNCTUATION_REGEX.match(unicode(fragment)) and not at_start:
+                buf.append(' ')
+            else:
+                at_start = False
+
+            if isinstance(fragment, Substitution):
+                buf.append('<del>{}</del><ins>{}</ins>'.format(*fragment))
+            else:
+                buf.append(fragment)
+
+    return ''.join(buf)
+
+
+def lines_between(lines, a, b):
+    return itertools.dropwhile(lambda line: not line.startswith(a),
+                               itertools.takewhile(lambda line: not line.startswith(b),
+                                                   (line.rstrip() for line in lines)))
+
+
+header = u'''
+<!DOCTYPE html>
+<html class="hide-deletions">
+    <head>
+        <meta charset="utf-8">
+        <style>
+            .hide-deletions del {
+                display: none;
+            }
+        </style>
+    </head>
+    <body>
+'''
+
+footer = u'''
+    </body>
+</html>
+'''
+
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG,
+                        format='%(asctime)s %(levelname)s %(name)s %(message)s',
+                       )
+
+    wordnet_rules = generate_rules()
+
+    log.info("Building mapping")
+    mapping = BiMapping(static_rules + wordnet_rules)
+
+    log.info("Slurping up some text")
     with codecs.open('input/pg1661.txt', 'r', 'utf-8') as f:
-        first_chapter = '\n'.join(
-            itertools.dropwhile(lambda line: not line == 'I.',
-                                itertools.takewhile(lambda line: not line == 'II.',
-                                                    (line.strip() for line in f))))
+        with codecs.open('output/pg1661.html', 'w', 'utf-8') as g:
+            lines = lines_between(f, 'ADVENTURE I.', 'ADVENTURE II.')
+            first_chapter = '\n'.join(lines)
+            log.info('%s characters', len(first_chapter))
 
-        paragraphs = map(swap_paragraph, first_chapter.split('\n\n'))
-        print '\n\n'.join(paragraphs)
-
+            paragraphs = first_chapter.split('\n\n')
+            swapped_paragraphs = [ swap_paragraph(mapping, p) for p in paragraphs ]
+            g.write(header)
+            for paragraph in swapped_paragraphs:
+                g.write(u'<p>{}</p>\n\n'.format(paragraph))
+            g.write(footer)
