@@ -1,0 +1,58 @@
+#!/usr/bin/python3
+import polib
+import random
+import re
+import sys
+
+fragments = set()
+translated_fragments = set()
+sentences = set()
+translated_sentences = set()
+
+def subst(bit, limit=5):
+    if limit == 0:
+        return bit
+
+    return (
+        re.sub(
+            r"%d",
+            lambda _match: str(random.choice(list({
+                x * (10 ** y)
+                for x in range(10)
+                for y in range(5)
+            }))),
+            re.sub(
+                r"(%s|{\d})",
+                lambda _match: subst(random.choice(translated_fragments), limit=limit - 1),
+                bit
+            ),
+        )
+    )
+
+
+sys.stderr.write("ingesting {} files ".format(len(sys.argv) - 1))
+for path in sys.argv[1:]:
+    sys.stderr.write(random.choice(".•·⁶°"))
+    sys.stderr.flush()
+    try:
+        pofile = polib.pofile(path)
+    except OSError as e:
+        continue
+
+    for msg in pofile:
+        if msg.msgid[-1] in ".:?!":
+            sentences.add(msg.msgid)
+            translated_sentences.add(msg.msgstr)
+        else:
+            fragments.add(msg.msgid)
+            translated_fragments.add(msg.msgstr)
+sys.stderr.write("\r\n")
+
+sentences = sorted(sentences)
+translated_sentences = sorted(translated_sentences)
+fragments = sorted(fragments)
+translated_fragments = sorted(translated_fragments)
+
+for paragraph_number in range(50):
+    print(" ".join(subst(x) for x in random.choices(sentences, k=5)))
+    print()
