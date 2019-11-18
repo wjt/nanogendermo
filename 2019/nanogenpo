@@ -1,15 +1,88 @@
 #!/usr/bin/python3
+import argparse
+import logging
+import multiprocessing
 import polib
 import random
 import re
 import sys
 
-fragments = set()
-translated_fragments = set()
-sentences = set()
-translated_sentences = set()
+from typing import List
+from dataclasses import dataclass, field
 
-def subst(bit, limit=5):
+
+@dataclass
+class PoMessages:
+    fragments: List[str] = field(default_factory=list)
+    sentences: List[str] = field(default_factory=list)
+
+    @classmethod
+    def merge(cls, messagess):
+        fs = set()
+        ss = set()
+        for m in messagess:
+            fs.update(m.fragments)
+            ss.update(m.sentences)
+
+        return cls(fragments=list(fs), sentences=list(ss))
+
+
+@dataclass
+class PoSegments:
+    english: PoMessages = field(default_factory=PoMessages)
+    translated: PoMessages = field(default_factory=PoMessages)
+
+    def add_from(self, pofile):
+        for msg in pofile.translated_entries():
+            if msg.msgid[-1] in ".:?!":
+                self.english.sentences.append(msg.msgid)
+                self.translated.sentences.append(msg.msgstr)
+            else:
+                self.english.fragments.append(msg.msgid)
+                self.translated.fragments.append(msg.msgstr)
+
+    @classmethod
+    def merge(cls, segmentss):
+        return cls(
+            english=PoMessages.merge(s.english for s in segmentss),
+            translated=PoMessages.merge(s.translated for s in segmentss),
+        )
+
+
+def load_from(path):
+    bits = PoSegments()
+
+    try:
+        pofile = polib.pofile(path)
+    except OSError:
+        return None
+
+    bits = PoSegments()
+    bits.add_from(pofile)
+    return bits
+
+
+def ingest(paths, processes=None):
+    pool = multiprocessing.Pool(processes=processes)
+    logging.info("Ingesting %d files with %d processes", len(paths), pool._processes)
+    bitss = []
+
+    for bits in pool.imap(load_from, paths):
+        sys.stderr.write(random.choice(".•·⁶°"))
+        sys.stderr.flush()
+
+        if bits is not None:
+            bitss.append(bits)
+
+    pool.close()
+    pool.join()
+
+    sys.stderr.write("\r\n")
+
+    return PoSegments.merge(bitss)
+
+
+def subst(bits, bit, limit=5):
     if limit == 0:
         return bit
 
@@ -23,36 +96,31 @@ def subst(bit, limit=5):
             }))),
             re.sub(
                 r"(%s|{\d})",
-                lambda _match: subst(random.choice(translated_fragments), limit=limit - 1),
+                lambda _match: subst(bits, random.choice(bits.translated.fragments), limit=limit - 1),
                 bit
             ),
         )
     )
 
 
-sys.stderr.write("ingesting {} files ".format(len(sys.argv) - 1))
-for path in sys.argv[1:]:
-    sys.stderr.write(random.choice(".•·⁶°"))
-    sys.stderr.flush()
-    try:
-        pofile = polib.pofile(path)
-    except OSError as e:
-        continue
+def generate(bits, paragraphs):
+    for paragraph_number in range(paragraphs):
+        print(" ".join(subst(bits, x) for x in random.choices(bits.english.sentences, k=5)))
+        print()
 
-    for msg in pofile:
-        if msg.msgid[-1] in ".:?!":
-            sentences.add(msg.msgid)
-            translated_sentences.add(msg.msgstr)
-        else:
-            fragments.add(msg.msgid)
-            translated_fragments.add(msg.msgstr)
-sys.stderr.write("\r\n")
 
-sentences = sorted(sentences)
-translated_sentences = sorted(translated_sentences)
-fragments = sorted(fragments)
-translated_fragments = sorted(translated_fragments)
+def main():
+    logging.basicConfig(level=logging.INFO)
 
-for paragraph_number in range(50):
-    print(" ".join(subst(x) for x in random.choices(sentences, k=5)))
-    print()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--processes", type=int)
+    parser.add_argument("--paragraphs", type=int, default=5)
+    parser.add_argument("paths", nargs='+')
+    args = parser.parse_args()
+
+    bits = ingest(args.paths, args.processes)
+    generate(bits, args.paragraphs)
+
+
+if __name__ == '__main__':
+    main()
